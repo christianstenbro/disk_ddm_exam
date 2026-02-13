@@ -1,0 +1,233 @@
+---
+title: "Untitled"
+author: "Christian Stenbro"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# loading files model 4
+files_m4 <- c("/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_000.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_001.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_002.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_003.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_004.RData",
+           #"/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_005.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_006.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_007.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_008.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results/param_recovery_batch_009.RData")
+
+df_m4 <- map_df(files_m4, function(f) {
+  e <- new.env()
+  load(f, envir = e)
+  as.list(e)
+})
+
+# loading files model 5
+files_m5 <- c("/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_000.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_001.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_002.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_003.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_004.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_005.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_006.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_007.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_008.RData",
+           "/Users/christianstenbro/Programming/disk_ddm/param_recovery/results_m5_1/param_recovery_m5_batch_009.RData")
+
+df_m5 <- map_df(files_m5, function(f) {
+  e <- new.env()
+  load(f, envir = e)
+  as.list(e)
+})
+```
+
+COMMENT: remember that we cannot use 5 in model 4 (due to failed sampling/fail during save)
+
+```{r}
+# m4
+plot(x=df_m4$true_drift_abs_H_diff,
+     y=df_m4$infer_drift_abs_H_diff,
+     ylim=c(-2,5))
+
+plot(x=df_m4$true_drift_intercept,
+     y=df_m4$infer_drift_intercept)
+```
+```{r}
+# m5
+plot(x=df_m5$true_drift_abs_H_diff,
+     y=df_m5$infer_drift_abs_H_diff,
+     ylim=c(3.5,3.6))
+
+plot(x=df_m5$true_drift_intercept,
+     y=df_m5$infer_drift_intercept)
+```
+
+# After fixing ranef when simulating recovery data
+
+Excluding failed run: batch 2
+
+```{r}
+# loading files model 4 with ranef data structure
+files_m4_ranef <- c("/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_000.RData",
+              "/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_001.RData",
+             # "/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_002.RData",
+              "/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_003.RData",
+              "/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_004.RData",
+              "/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_005.RData",
+              "/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_006.RData",
+              "/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_007.RData",
+              "/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_008.RData",
+              "/Users/christianstenbro/Programming/disk_ddm/param_recovery/rstudio-export_m4_ranef_entropy/param_recovery_batch_009.RData"
+              )
+
+df_m4_ranef <- lapply(files_m4_ranef, function(f) {
+  e <- new.env()
+  load(f, envir = e)
+  as.list(e)
+})
+```
+
+```{r}
+
+```
+
+
+```{r}
+# drift_abs_H_diff 
+
+# setting up lists
+true_par <- list()
+inferred_par_point <- list()
+inferred_par_low <- list()
+inferred_par_up <- list()
+
+for (i in 1:length(files_m4_ranef)){
+ 
+  true_par[i] <- df_m4_ranef[[i]]$true_drift_abs_H_diff
+  inferred_par_point[i] <- df_m4_ranef[[i]]$infer_drift_abs_H_diff[1]
+  inferred_par_low[i] <- df_m4_ranef[[i]]$infer_drift_abs_H_diff[3]
+  inferred_par_up[i] <- df_m4_ranef[[i]]$infer_drift_abs_H_diff[4]
+}
+
+# plotting
+plot(x = unlist(true_par),
+     y = unlist(inferred_par_point),
+     pch = 19,
+     #main = "Parameter recovery 2",
+     #sub = "Systematically increasing the |Shannon Entropy Difference| parameter",
+     xlab = "True value",
+     ylab = "Inferred value (with 95% CI)",
+     ylim = c(0,10),
+     xlim= c(0,10))
+
+mtext("Parameter recovery 2", side = 3, line = 2, cex = 1.2, font = 2)  # Main title
+mtext("Systematically increasing the |Shannon Entropy Difference| parameter", side = 3, line = 1, cex = 0.9)
+
+# Add error bars
+arrows(x0 = unlist(true_par),
+       y0 = unlist(inferred_par_low),
+       x1 = unlist(true_par),
+       y1 = unlist(inferred_par_up),
+       angle = 90,
+       code = 3,
+       length = 0.05)
+
+# Optional: add 1:1 reference line
+abline(a = 0, b = 1, lty = 2, col = "gray")
+```
+
+
+```{r}
+# drift_abs_H_diff 
+df_m4_ranef[[i]]infer_drift_abs_H_diff
+```
+
+Plotting all parameters (should be done for the random parameter recovery; not the one testing the effect of shannon entropy :
+
+```{r}
+# Function to extract and plot parameter recovery
+plot_param_recovery <- function(df_list, true_var, infer_var, title, xlim = NULL, ylim = NULL) {
+  
+  # Extract values
+  true_par <- list()
+  inferred_par_point <- list()
+  inferred_par_low <- list()
+  inferred_par_up <- list()
+  
+  for (i in 1:length(df_list)) {
+    true_par[i] <- df_list[[i]][[true_var]]
+    inferred_par_point[i] <- df_list[[i]][[infer_var]][1]
+    inferred_par_low[i] <- df_list[[i]][[infer_var]][3]
+    inferred_par_up[i] <- df_list[[i]][[infer_var]][4]
+  }
+  
+  # Auto-set limits if not provided
+  if (is.null(xlim)) xlim <- range(unlist(true_par))
+  if (is.null(ylim)) ylim <- range(c(unlist(inferred_par_low), unlist(inferred_par_up)))
+  
+  # Plot
+  plot(x = unlist(true_par),
+       y = unlist(inferred_par_point),
+       pch = 19,
+       main = title,
+       xlab = "True parameter",
+       ylab = "Inferred parameter",
+       xlim = xlim,
+       ylim = ylim)
+  
+  # Error bars
+  arrows(x0 = unlist(true_par),
+         y0 = unlist(inferred_par_low),
+         x1 = unlist(true_par),
+         y1 = unlist(inferred_par_up),
+         angle = 90,
+         code = 3,
+         length = 0.05)
+  
+  # Reference line
+  abline(a = 0, b = 1, lty = 2, col = "gray")
+}
+
+# Use it for all your parameters
+par(mfrow = c(2, 2))  # 2x2 grid of plots
+
+plot_param_recovery(df_m4_ranef, 
+                    "true_drift_abs_H_diff", 
+                    "infer_drift_abs_H_diff",
+                    "Entropy Difference",
+                    xlim = c(0, 10),
+                    ylim = c(0, 10))
+
+plot_param_recovery(df_m4_ranef, 
+                    "true_drift_H_sum", 
+                    "infer_drift_H_sum",
+                    "Entropy Sum")
+
+plot_param_recovery(df_m4_ranef, 
+                    "true_drift_interaction", 
+                    "infer_drift_interaction",
+                    "Entropy Sum*Difference interaction")
+
+# Reset plotting layout
+par(mfrow = c(1, 1))
+```
+
+```{r}
+names(df_m4_ranef[[i]])
+```
+
+
+
+```{r}
+plot(x=unlist(true_par),
+     y=unlist(inferred_par_point))
+abline(a = 0, b = 1, lty = 2, col = "gray")
+```
+
+

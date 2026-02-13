@@ -1,0 +1,2010 @@
+---
+title: "disk_data_processing"
+author: "Christian Stenbro"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Before using this script, please make sure that you create an R project in the root directory - for example 'disk_ddm.Rproj'
+
+# 1. Set-up
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999) # disabling scientific notation
+```
+
+```{r}
+#remotes::install_github("stan-dev/cmdstanr")
+```
+
+
+```{r}
+# set up packages
+pacman::p_load(here, 
+               tidyverse,
+               rethinking,
+               brms,
+               ggplot2,
+               gridExtra,
+               DescTools,
+               RWiener,
+               bayesplot,
+               rtdists,
+               bayestestR)
+```
+
+```{r}
+# defining paths (using the here package)
+otree_path = here('data', 'otree_data_only_approved_participants.csv')
+prolific_path = here('data', 'fluent_langauge_filter_applied_prolific_demographic_export_6735f0e0d247c76eb9dfcaa6.csv')
+disk_features_path = here('data', 'entropy_df.csv')
+disk_complexity_path = here('data', 'disk_complexity.csv')
+```
+
+```{r}
+# read data
+otree_data <- read.csv(file = otree_path)
+prolific_data <- read.csv(file = prolific_path)
+disk_features <- read.csv(file = disk_features_path)
+disk_complexity <- read.csv(file = disk_complexity_path)
+```
+
+```{r}
+# read disk stimuli file names from the oddball experiment (study 1 - from the OT disk otree project git repository)
+disk_names <- list.files(here('disk_stimuli', 'stimuli'))
+```
+
+```{r}
+disk_complexity
+```
+
+
+# 2. Inspecting the data
+
+Comment: *This section contains summary statistics computed prior to any pre-processing. Many of these statistics are reported in section 3.3 in the project paper.*
+
+To make sure that all stimuli from the Otree experiment can be found in the disk_stimuli folder, we need to match the strings in *full_disk_names* with those in *otree_data$oddball* and *otree_data$foil*. This requires some cleaning first (to remove the /stimuli in front of disk names):
+
+```{r}
+# cleaning names
+otree_data$oddball <- str_replace(otree_data$oddball, 'stimuli/', '')
+otree_data$foil <- str_replace(otree_data$foil, 'stimuli/', '')
+```
+
+```{r}
+# matching strings - should return TRUE
+print(unique(otree_data$oddball %in% disk_names))
+print(unique(otree_data$foil %in% disk_names))
+```
+
+Extracting the sample size:
+
+```{r}
+cat("n =", length(unique(otree_data$participant_code)))
+```
+
+Tabulating trials pr. participant:
+
+```{r}
+cat("Trials pr. participant =", otree_data %>% group_by(participant_code) %>% count() %>% pull(n) %>% unique(n))
+```
+
+Tabulating incorrect/correct distribution:
+
+```{r}
+# tabulating response distributions
+accuracy <- table(otree_data$correct)
+cat('incorrect/correct trials:')
+print(accuracy)
+cat('\n','total trials =', nrow(otree_data))
+
+# getting this as a fraction
+correct_trials = data.frame(accuracy)[2,2]/nrow(otree_data)
+cat('\n','proportion of correct trials (round 2) =', round(correct_trials, 2))
+```
+```{r}
+# computing summary stats for response times for correct and incorrect trials
+by(otree_data$response_time, otree_data$correct, function(x) {
+  round(c(Mean = mean(x, na.rm = TRUE), 
+          SD = sd(x, na.rm = TRUE),
+          Median = median(x, na.rm = TRUE),
+          Min = min(x, na.rm = TRUE),
+          Max = max(x, na.rm = TRUE)), 2)
+})
+```
+
+```{r}
+# plotting this
+counts <- table(otree_data$correct)
+names(counts) <- c("Incorrect", "Correct")
+
+mp <- barplot(counts, 
+              main = "Incorrect/Correct Frequency",
+              ylab = "Frequency",
+              col = c("red", "blue"),
+              ylim = c(0, max(counts) * 1.2))
+```
+
+
+There is a large imbalance between correct and incorrect trials, with many more correct trials!
+
+# 3. Combining data frames and calculating entropy/complexity differences
+
+For each trial, we have a foil (a circle of repeated disks) and an oddball disk. We need to compute the difference in Shannon Entropy (H) between the oddball and the foil disks. 
+
+Question: Should the distance be absolute or not? It could make a difference if the oddball is *more* or *less* entropic compared to the foil; so maybe it is better to hold on to this information. I will go with relative differences defined as: $$H_d = H_o - H_f$$
+
+```{r}
+# matching the disk_feature data with the correct rows in the otree data frame
+# we need to create two new columns; one should contain oddball entropies; the other foil entropies
+
+H_foil <- c()
+H_oddball <- c()
+P_foil <- c()
+P_oddball <- c()
+
+for (i in 1:nrow(otree_data)){
+  
+  # identify trial foil + oddball
+  foil_disk <- otree_data$foil[i]
+  oddball_disk <- otree_data$oddball[i]
+  
+  # match with disks in disk_features and store entropy / perimetric complexity
+  H_foil[i] <- disk_features$entropy[disk_features$image == foil_disk]
+  H_oddball[i] <- disk_features$entropy[disk_features$image == oddball_disk]
+  
+  P_foil[i] <- disk_complexity$disk_complexity[disk_complexity$image == foil_disk]
+  P_oddball[i] <- disk_complexity$disk_complexity[disk_complexity$image == oddball_disk]
+  
+}
+```
+
+
+```{r}
+# checking lists - should sanity check as well after adding these to the data frame
+head(H_foil)
+head(H_oddball)
+head(P_foil)
+head(P_oddball)
+```
+```{r}
+# sanity check (should return TRUE for all)
+unique(H_oddball %in% disk_features$entropy)
+unique(H_foil %in% disk_features$entropy)
+
+unique(P_oddball %in% disk_complexity$disk_complexity)
+unique(P_foil %in% disk_complexity$disk_complexity)
+```
+```{r}
+# adding to the data frame
+otree_data$H_foil <- H_foil
+otree_data$H_oddball <- H_oddball
+otree_data$P_foil <- P_foil
+otree_data$P_oddball <- P_oddball
+
+# computing new column of differences
+otree_data <- otree_data %>% mutate(H_difference = H_foil - H_oddball, P_difference = P_foil - P_oddball)
+
+# computing new column as sum of entropy for all stimuli in each trial
+otree_data <- otree_data %>% mutate(H_sum = H_foil + H_oddball)
+```
+
+## 3.1 Summary statisitics for the complexity measures
+
+The following stats are computed:
+
+-	Mean Shannon Entropy + SD (stimulus set, n = 37)
+-	Mean Perimetric Complexity + SD (stimulus set, n = 37)
+
+-	Mean of Absolute Shannon Entropy Difference + SD (entire behavioural data frame)
+-	Mean of Absolute Perimetric Complexity Difference + SD (entire behavioural data frame)
+
+```{r}
+# printing stimulus set stats
+cat("Avg. Shannon Entropy in stimulus set:\n")
+x <- disk_features$entropy
+round(c(Mean = mean(x, na.rm = TRUE), 
+          SD = sd(x, na.rm = TRUE),
+          Median = median(x, na.rm = TRUE),
+          Min = min(x, na.rm = TRUE),
+          Max = max(x, na.rm = TRUE)), 2)
+
+cat("\nAvg. Perimetric Complexity in stimulus set:\n")
+x <- disk_complexity$disk_complexity
+round(c(Mean = mean(x, na.rm = TRUE), 
+          SD = sd(x, na.rm = TRUE),
+          Median = median(x, na.rm = TRUE),
+          Min = min(x, na.rm = TRUE),
+          Max = max(x, na.rm = TRUE)), 2)
+```
+```{r}
+# printing absolute differences of the entire sample
+cat("Avg. Absolute Shannon Entropy Difference across the sample set:\n")
+x <- abs(otree_data$H_difference)
+round(c(Mean = mean(x, na.rm = TRUE), 
+          SD = sd(x, na.rm = TRUE),
+          Median = median(x, na.rm = TRUE),
+          Min = min(x, na.rm = TRUE),
+          Max = max(x, na.rm = TRUE)), 2)
+
+cat("\nAvg. Absolute Perimetric Complexity Difference across the sample set:\n")
+x <- abs(otree_data$P_difference)
+round(c(Mean = mean(x, na.rm = TRUE), 
+          SD = sd(x, na.rm = TRUE),
+          Median = median(x, na.rm = TRUE),
+          Min = min(x, na.rm = TRUE),
+          Max = max(x, na.rm = TRUE)), 2)
+```
+## 3.2 Corr test before pre-processing
+
+```{r}
+# plotting the data
+plot(x = abs(otree_data$H_difference), 
+     y = abs(otree_data$P_difference),
+     col = rgb(0, 0, 1, 1), 
+     xlab = 'Abs. H difference',
+     ylab = 'Abs. P difference',
+     main = 'Perimetric Complexity (P) plotted against Shannon Entropy (H)', 
+     abline(v=0))
+```
+
+The two measures are highly correlated:
+
+```{r}
+abs_H_P_cor <- cor.test(x = abs(otree_data$H_difference),
+                    y = abs(otree_data$P_difference))
+```
+
+```{r}
+print(abs_H_P_cor)
+round(abs_H_P_cor$estimate, 2)
+```
+
+# 4. Processing data prior to model fitting
+
+COMMENT: *Various pre-processing, reported in section 4 of the paper*:
+
+- Remove outliers
+- Streamline IDs (numeric identifier)
+- Factorize binary variables
+
+First, lets look at response times:
+
+## 4.2 Looking at response times and removing outliers
+
+```{r}
+# plotting RT distribution for correct/incorrect answers, no filter on RT
+plot(otree_data$response_time[otree_data$correct==1],
+     col = rgb(0,0,1,0.5), 
+     main = 'Unfiltered RTs for correct responses',
+     ylab = 'RT (seconds)',
+     xlab = "Trial Index")
+abline(h = mean(otree_data_filtered$response_time[otree_data_filtered$correct==1]))
+plot(otree_data$response_time[otree_data$correct==0],
+     col = rgb(1,0,0,0.5),
+     main = 'Unfiltered RTs for incorrect responses',
+     ylab = 'RT (seconds)',
+     xlab = "Trial Index")
+abline(h = mean(otree_data_filtered$response_time[otree_data_filtered$correct==0]))
+```
+
+Response times slower than 5 seconds and faster than 0.1 seconds are removed:
+
+```{r}
+nrow(otree_data)
+```
+
+```{r}
+# setting thresholds in seconds
+ut <- 5
+lt <- 0.1
+
+# computing the proportions:
+above_ut <- length(otree_data$response_time[otree_data$response_time>ut])
+below_lt <- length(otree_data$response_time[otree_data$response_time>lt])
+total_trials <- nrow(otree_data)
+
+upper_prop <- above_ut/total_trials*100
+lower_prop <- below_lt/total_trials
+
+paste('RTs above 5 seconds, corresponding to',round(upper_prop, 2),'% of the data, have been removed')
+paste('RTs below 0.1 seconds, corresponding to',round(lower_prop, 2),'% of the data, have been removed')
+paste('In total', round(sum(upper_prop, lower_prop),2), '% of the data have been removed')
+paste('Of excluded trials,', round(lower_prop/sum(upper_prop, lower_prop)*100,2), '% are too fast trials')
+```
+
+This fits within the 2-3% loss range mentioned in Ratcliff & McKoon (2008).
+
+Filtering is applied:
+
+```{r}
+otree_data_filtered <- otree_data %>% filter(response_time > lt & response_time < ut)
+```
+
+```{r}
+# plotting RT distribution for correct/incorrect answers, after filtering RTs
+plot(x = otree_data_filtered$response_time[otree_data_filtered$correct==1],
+     col = rgb(0,0,1,0.2), 
+     main = 'Filtered RTs for correct responses',
+     ylab = 'RT (seconds)',
+     xlab = "Trial Index")
+abline(h = mean(otree_data_filtered$response_time[otree_data_filtered$correct==1]))
+plot(otree_data_filtered$response_time[otree_data_filtered$correct==0],
+     col = rgb(1,0,0,0.5),
+     main = 'Filtered RTs for incorrect responses',
+     ylab = 'RT (seconds)',
+     xlab = "Trial Index")
+abline(h = mean(otree_data_filtered$response_time[otree_data_filtered$correct==0]))
+```
+We can also plot this as a binned distribution:
+
+```{r}
+# plotting RT distribution for correct/incorrect answers, RT < 6
+hist(otree_data$response_time[otree_data$correct==1 & otree_data$response_time < 6],
+     col = rgb(0,0,1,1), 
+     main = 'Filtered RTs for correct responses < 6 sec (no lower limit)',
+     xlab = 'RT (seconds)')
+hist(otree_data$response_time[otree_data$correct==0 & otree_data$response_time < 6],
+     col = rgb(1,0,0,1),
+     main = 'Filtered RTs for incorrect responses < 6 sec (no lower limit)',
+     xlab = 'RT (seconds)')
+```
+
+Let's count the number of responses below 0.1:
+
+```{r}
+very_fast_rts <- length(otree_data$response_time[otree_data$correct==0 & otree_data$response_time < 0.1])
+cat("Very fast RTs =", very_fast_rts, "trials out of", length(otree_data$response_time[otree_data$correct==0]), "trials")
+```
+
+```{r}
+print("Number of incorrect trials with RT below 0.1:")
+length(otree_data$response_time[otree_data$correct==0 & otree_data$response_time < 0.1])
+
+print("Number of correct trials with RT below 0.1:")
+length(otree_data$response_time[otree_data$correct==1 & otree_data$response_time < 0.1])
+```
+COMMENT: This is very troubling for the incorrect trials. It is practically impossible to answer that fast, even without processing the stimulus. Hence, these many incorrect responses must be attributable to technical errors during the data collection.
+
+We can also consider that many of these are just plainly zero:
+
+```{r}
+print("Table of incorrect trials with RT below 0.1:")
+table(otree_data$response_time[otree_data$correct==0 & otree_data$response_time < 0.1])
+```
+
+Ultimately, this means that we only have a fraction of incorrect trials, which challenges the use of a two-choice Drift Diffusion Model:
+
+```{r}
+# computing proportion of incorrect trials in the total sample after filtering:
+total_trials_filtered <- nrow(otree_data_filtered)
+
+total_incluted_incor_trials <- length(otree_data_filtered$response[otree_data_filtered$correct==0])
+
+cat("Percentage of incorrect trials in the complete sample, after filtering:", round(total_incluted_incor_trials/total_trials_filtered * 100, 2), "%")
+```
+
+In addition, we can observer that the distributions of RTs across conditions are very similar:
+
+```{r}
+# plotting RT distribution for correct/incorrect answers, RT < 6
+hist(otree_data_filtered$response_time[otree_data_filtered$correct==1],
+     col = rgb(0,0,1,1), 
+     main = 'Filtered RTs for correct responses',
+     xlab = 'RT (seconds)')
+hist(otree_data_filtered$response_time[otree_data_filtered$correct==0],
+     col = rgb(1,0,0,1),
+     main = 'Filtered RTs for incorrect responses',
+     xlab = 'RT (seconds)')
+```
+
+All of this could point towards discarding incorrect trials, and modelling the data as a single choice task (essentially, as detection of the oddball).
+
+## 4.2 Streamline IDs (numeric identifier)
+
+```{r}
+plot(sort(unique(otree_data_filtered$id_in_csv)))
+```
+
+I will make a new ID column, from 1 to n_participants with no gaps:
+
+```{r}
+numeric_ID <- as.numeric(factor(otree_data_filtered$participant_label))
+plot(sort(unique(numeric_ID)))
+```
+
+```{r}
+# and add it to the data frame
+otree_data_filtered$numeric_ID <- numeric_ID
+```
+
+```{r}
+length(unique(otree_data_filtered$participant_label))
+length(unique(otree_data$participant_label))
+length(unique(otree_data$participant_code))
+
+otree_data %>% group_by(participant_label) %>% count()
+```
+
+61479b4bd8bfa0c321f3a4ab
+61662fa6ae6c3fe8134cc09c
+
+```{r}
+otree_data %>% filter(participant_label=="61479b4bd8bfa0c321f3a4ab") %>% count(response_time) %>% 
+  filter(n > 1)
+
+otree_data %>% filter(participant_label=="61662fa6ae6c3fe8134cc09c") %>% count(response_time) %>% 
+  filter(n > 1)
+```
+
+
+
+## 4.3 Factorize variables
+
+Here, I have factorized variables to match the formats in Singmann's Brms Wiener model tutorial: http://singmann.org/wiener-model-analysis-with-brms-part-i/
+
+```{r}
+otree_data_filtered$correct <- as.numeric(otree_data_filtered$correct)
+```
+
+```{r}
+otree_data_filtered$numeric_ID <- factor(otree_data_filtered$numeric_ID)
+#otree_data_filtered$H_difference <- array(otree_data_filtered$H_difference)
+```
+
+```{r}
+str(otree_data_filtered)
+```
+
+## 4.4 Creating streamlined data frame with new variable names for model fitting
+
+```{r}
+model_data <- otree_data_filtered %>% select(participant_label = participant_label,
+                                             ID = numeric_ID,
+                                             foil = foil,
+                                             oddball = oddball,
+                                             response = correct,
+                                             RT = response_time,
+                                             H_foil = H_foil,
+                                             H_oddball = H_oddball,
+                                             H_difference = H_difference,
+                                             H_sum = H_sum,
+                                             P_foil = P_foil,
+                                             P_oddball = P_oddball,
+                                             P_difference = P_difference)
+```
+
+```{r}
+str(model_data)
+```
+
+# 5. Plotting variables
+
+Plotting RTs and the different measures:
+
+```{r}
+plot(x = model_data$RT, 
+     y = model_data$H_difference,
+     col = rgb(0,0,1,0.2),
+     xlab = 'RT',
+     ylab = 'H difference',
+     main = "Shannon Entropy (H) plotted against RTs",
+     abline(h=0))
+```
+
+```{r}
+plot(x = model_data$RT, 
+     y = model_data$P_difference,
+     col = rgb(0,0,1,0.2),
+     xlab = 'RT',
+     ylab = 'P difference',
+     main = "Perimetric Complexity (P) plotted against RTs",
+     abline(h=0))
+```
+
+```{r}
+plot(x = model_data$H_difference, 
+     y = model_data$P_difference,
+     col = rgb(0, 0, 1, 1), 
+     xlab = 'H difference',
+     ylab = 'P difference',
+     main = 'Perimetric Complexity (P) plotted against Shannon Entropy (H)', 
+     abline(v=0))
+```
+
+The two measures are highly correlated:
+
+```{r}
+H_P_cor <- cor.test(x = model_data$H_difference,
+         y = model_data$P_difference)
+```
+
+```{r}
+print(H_P_cor)
+round(H_P_cor$estimate, 2)
+```
+Due to the very high correlation (r = 0.98), only a single measure (Shannon Entropy) will be used for model fitting.
+
+Another interesting thing to notice about the correlation plot (an the other plots) is that it is symmetrical around zero; this makes sense, considering that all combinations between foils and oddballs likely appears together in the data set. Thus, all combinations will have a positive and a negative difference.
+
+Also checking correlation between sums and differences of entropy:
+
+```{r}
+plot(x = model_data$H_difference, 
+     y = model_data$H_sum,
+     col = rgb(0, 0, 1, 1), 
+     xlab = 'H difference',
+     ylab = 'H sum',
+     main = 'Entropy sum and difference correlation plot', 
+     abline(v=0))
+```
+```{r}
+cor.test(x = model_data$H_difference, y = model_data$H_sum)
+```
+
+
+# 6. Saving model data for ucloud
+
+```{r}
+#write_csv(model_data, file = here('data', 'model_data.csv'))
+```
+
+# 7. Trying a downsampled version
+
+```{r}
+model_data_downsampled <- model_data %>%
+  group_by(ID) %>%
+  slice_sample(n = 100) %>%
+  ungroup()
+```
+
+```{r}
+nrow(model_data_downsampled)
+```
+
+Saving the downsampled data set:
+
+```{r}
+# write_csv(model_data_downsampled, file = here('data', 'model_data_downsampled.csv'))
+```
+
+
+# 8. Fitting model
+
+I will fit a Wiener model, which is a Drift Diffusion Model (DDM) with four parameters:
+
+- Drift rate (delta)
+- Boundary separation (alpha)
+- Starting point (beta); also referred to as the *bias*
+- Non-decision time (tau)
+
+The model is fitted via the Brms implementation and both fitting and evaluation closely follows the tutorials given by H. Sigmann (part 1 is here: http://singmann.org/wiener-model-analysis-with-brms-part-i/).
+
+Model specifications [confirm these formulations]:
+
+- Drift rates are allowed to vary according to the entropy difference (H_difference) of each trial; and different rates are estimated for correct and incorrect trials.
+
+- Remaining parameters have fixed estimates
+
+- Random effects for participant IDs are included in the model. 
+
+Defining formula. Wondering whether to only include the entropy difference or also the general entropy of disks (i.e., RTs could be expected to be faster generally if the total entropy of all visual stimuli is lower and vice versa).
+
+
+```{r}
+formula <- bf(RT | dec(response) ~ H_difference +
+                (1|ID), 
+               bs ~ 1 + (1|ID), 
+               ndt ~ 1 + (1|ID),
+               bias ~ 1 + (1|ID))
+```
+
+```{r}
+#unique(model.matrix(~ 0 + model_data$H_difference))
+```
+
+Getting priors:
+
+```{r}
+get_prior(formula,
+          data = model_data_downsampled,
+          family = wiener(link_bs = "identity",
+                          link_ndt = "log",
+                          link_bias = "identity"))
+```
+```{r}
+# setting priors following Singmann
+prior <- c(
+ prior("cauchy(0, 5)", class = "b"),
+ set_prior("normal(1.5, 1)", class = "Intercept", dpar = "bs"),
+ set_prior("normal(-2.6, 0.3)", class = "Intercept", dpar = "ndt"),
+ set_prior("normal(0.5, 0.2)", class = "Intercept", dpar = "bias")
+)
+```
+
+```{r}
+# checking out the prior
+prior
+```
+```{r}
+prior_stable <- c(
+  prior("normal(1, 0.5)", class = "Intercept"),               # Drift Intercept
+  prior("normal(0, 0.5)", class = "b"),                       # Entropy Effect
+  set_prior("normal(1.2, 0.3)", class = "Intercept", dpar = "bs"),
+  set_prior("normal(-2.8, 0.1)", class = "Intercept", dpar = "ndt"), # Log-scale ~0.06s
+  set_prior("normal(0.5, 0.05)", class = "Intercept", dpar = "bias"),
+  prior("normal(0, 0.1)", class = "sd")                       # Tight shrinkage
+)
+```
+
+
+```{r}
+# inspecting the model code
+make_stancode(formula, 
+              family = wiener(link_bs = "identity", 
+                              link_ndt = "log",
+                              link_bias = "identity"),
+              data = model_data_downsampled, 
+              prior = prior_stable)
+```
+
+Setting starting values:
+
+```{r}
+tmp_dat <- make_standata(formula, 
+                         family = wiener(link_bs = "identity", 
+                              link_ndt = "identity",
+                              link_bias = "identity"),
+                            data = model_data_downsampled, prior = prior_stable)
+```
+
+```{r}
+str(tmp_dat, 1, give.attr = FALSE)
+```
+
+
+```{r}
+initfun_alt <- function() {
+  list(
+    # 'b' usually remains an array if it's a non-intercept population effect
+    b = as.array(rnorm(1, 0, 0.1)), 
+    
+    # REMOVED as.array() - these must be scalars (just single numbers)
+    Intercept_bs = runif(1, 1, 1.2),
+    Intercept_ndt = runif(1, -3.2, -2.8),
+    Intercept_bias = runif(1, 0.45, 0.55),
+    
+    # sd_1 is a vector of lengths matching number of random effects
+    sd_1 = as.array(runif(tmp_dat$M_1, 0.1, 0.3)),
+    
+    # L_1 is a correlation matrix
+    L_1 = diag(tmp_dat$M_1),
+    
+    # z_1 is a matrix (this is usually fine as is)
+    z_1 = matrix(rnorm(tmp_dat$M_1 * tmp_dat$N_1, 0, 0.01), tmp_dat$M_1, tmp_dat$N_1)
+  )
+}
+```
+
+```{r}
+initfun <- function() {
+  list(
+    b = as.array(rnorm(1, 0, 0.05)), 
+    Intercept = 1.0,                                # Scalar
+    Intercept_bs = 1.2,                             # Scalar
+    Intercept_ndt = -4,                           # Scalar (Log space)
+    Intercept_bias = 0.5,                           # Scalar
+    sd_1 = as.array(rep(0.05, tmp_dat$M_1)),        # Small initial variance
+    L_1 = diag(tmp_dat$M_1),
+    z_1 = matrix(0, tmp_dat$M_1, tmp_dat$N_1)       # Start with zero random deviations
+  )
+}
+```
+
+
+```{r}
+tmp_dat$K
+```
+
+
+Fitting model: 
+
+```{r}
+fit_wiener <- brm(formula, 
+                  data = model_data_downsampled,
+                  family = wiener(link_bs = "identity", 
+                                  link_ndt = "log",
+                                  link_bias = "identity"),
+                  prior = prior_stable, 
+                  init = initfun,
+                  iter = 1000, 
+                  warmup = 500, 
+                  chains = 4, 
+                  cores = 4, 
+                  refresh = 1,
+                  file = "fit_wiener",
+                  control = list(max_treedepth = 15, adapt_delta = 0.95))
+```
+
+```{r}
+fit_wiener
+```
+```{r}
+hypothesis(fit_wiener, "H_difference > 0")
+```
+# 9. Trying a model with both coefficients
+
+```{r}
+m2_formula <- bf(RT | dec(response) ~ H_difference + H_sum + (1|ID), 
+                   bs ~ 1 + (1|ID), 
+                   ndt ~ 1 + (1|ID), 
+                   bias ~ 1 + (1|ID))
+
+m2_prior <- c(
+  prior(normal(0, 1), class = "b", coef = "H_difference"),
+  prior(normal(0, 1), class = "b", coef = "H_sum"),
+  prior(normal(1.5, 0.5), class = "Intercept", dpar = "bs"),
+  prior(normal(-3, 0.5), class = "Intercept", dpar = "ndt")
+)
+
+m2_initfun <- function() {
+  list(
+    # Length 2 for H_difference and H_sum
+    b = as.array(c(0, 0)), 
+    Intercept = 0,
+    Intercept_bs = 1.5,
+    # Low NDT prevents the "initial value" crash
+    Intercept_ndt = -3.5, 
+    Intercept_bias = 0.5
+  )
+}
+
+m2_fit <- brm(m2_formula, 
+                  data = model_data_downsampled,
+                  family = wiener(link_bs = "identity", 
+                                  link_ndt = "log",
+                                  link_bias = "identity"),
+                  prior = m2_prior, 
+                  init = m2_initfun,
+                  iter = 1000, 
+                  warmup = 500, 
+                  chains = 4, 
+                  cores = 4, 
+                  refresh = 1,
+                  file = "fit_wiener_model_2_1",
+                  control = list(max_treedepth = 15, adapt_delta = 0.95))
+```
+```{r}
+m2_fit
+```
+
+```{r}
+hypothesis(m2_fit, "H_difference > 0")
+```
+```{r}
+hypothesis(m2_fit, "H_sum > 0")
+```
+
+## 9.1 Interaction model with stimuli random intercept
+
+This is the most accurate operationalization of the research question!!!
+
+```{r}
+# coding stimulis ID variable
+# I will make a single identifier for each unique combination of foil / oddball
+model_data_downsampled <- model_data_downsampled %>% unite("foil_oddball_combined", foil:oddball, remove = FALSE)
+
+# turning this into a factor variable, with a unique identifier for each foil / oddball combination
+model_data_downsampled$foil_oddball_combined <- as.numeric(as.factor(model_data_downsampled$foil_oddball_combined))
+
+# renaming variable
+model_data_downsampled <- model_data_downsampled %>% rename('stimulus' = foil_oddball_combined)
+```
+
+
+```{r}
+# fitting a new model including interaction between H diff and sum + random stimulus intercepts
+m3_formula <- bf(RT | dec(response) ~ H_difference * H_sum + (1|ID) + (1 | stimulus), 
+                   bs ~ 1 + (1|ID), 
+                   ndt ~ 1 + (1|ID), 
+                   bias ~ 1 + (1|ID))
+
+m3_prior <- c(
+  prior(normal(0, 1), class = "b", coef = "H_difference"),
+  prior(normal(0, 1), class = "b", coef = "H_sum"),
+  prior(normal(1.5, 0.5), class = "Intercept", dpar = "bs"),
+  prior(normal(-3, 0.5), class = "Intercept", dpar = "ndt")
+)
+
+m3_initfun <- function() {
+  list(
+    b = as.array(c(0, 0, 0)), 
+    Intercept = 0,
+    Intercept_bs = 1.5,
+    Intercept_ndt = -3.5, 
+    Intercept_bias = 0.5,
+    # Random effect SDs (one for ID, one for stimulus)
+    sd_1 = as.array(0.1), 
+    sd_2 = as.array(0.1),
+    # You might also need SDs for the dpars since they have (1|ID)
+    sd_3 = as.array(0.1), # for bs
+    sd_4 = as.array(0.1), # for ndt
+    sd_5 = as.array(0.1)  # for bias
+  )
+}
+
+m3_fit <- brm(m3_formula, 
+                  data = model_data_downsampled,
+                  family = wiener(link_bs = "identity", 
+                                  link_ndt = "log",
+                                  link_bias = "identity"),
+                  prior = m3_prior, 
+                  init = m3_initfun,
+                  iter = 1000, 
+                  warmup = 500, 
+                  chains = 4, 
+                  cores = 4, 
+                  refresh = 1,
+                  file = "fit_wiener_model_3",
+                  control = list(max_treedepth = 15, adapt_delta = 0.95))
+```
+```{r}
+m3_fit
+```
+
+```{r}
+hypothesis(m3_fit, "H_difference > 0")
+hypothesis(m3_fit, "H_sum > 0")
+hypothesis(m3_fit, "H_difference:H_sum > 0")
+```
+```{r}
+ggplot(model_data_downsampled, aes(x = H_difference, y = RT)) + 
+  geom_point(alpha = 0.1) + 
+  geom_smooth(method = "lm")
+```
+Problem; the H_difference is actually symmetric around 0; meaning that we would probably gain from using the absolute difference instead of the actual difference:
+
+```{r}
+# transforming variable
+model_data_downsampled$abs_H_difference <- abs(model_data_downsampled$H_difference)
+```
+
+```{r}
+# plotting the absolute diff
+ggplot(model_data_downsampled, aes(x = abs_H_difference, y = RT)) + 
+  geom_point(alpha = 0.1) + 
+  geom_smooth(method = "lm")
+```
+
+## 9.2 Abs difference model
+
+```{r}
+# fitting a new model including interaction between H diff and sum + random stimulus intercepts
+m4_formula <- bf(RT | dec(response) ~ abs_H_difference * H_sum + (1|ID) + (1 | stimulus), 
+                   bs ~ 1 + (1|ID), 
+                   ndt ~ 1 + (1|ID), 
+                   bias ~ 1 + (1|ID))
+
+m4_prior <- c(
+  prior(normal(0, 1), class = "b", coef = "abs_H_difference"),
+  prior(normal(0, 1), class = "b", coef = "H_sum"),
+  prior(normal(1.5, 0.5), class = "Intercept", dpar = "bs"),
+  prior(normal(-3, 0.5), class = "Intercept", dpar = "ndt")
+)
+
+m4_initfun <- function() {
+  list(
+    b = as.array(c(0, 0, 0)), 
+    Intercept = 0,
+    Intercept_bs = 1.5,
+    Intercept_ndt = -3.5, 
+    Intercept_bias = 0.5,
+    # random effect SDs (one for ID, one for stimulus)
+    sd_1 = as.array(0.1), 
+    sd_2 = as.array(0.1),
+    # SDs for the dpars since they have (1|ID)
+    sd_3 = as.array(0.1), # for bs
+    sd_4 = as.array(0.1), # for ndt
+    sd_5 = as.array(0.1)  # for bias
+  )
+}
+
+m4_fit <- brm(m4_formula, 
+                  data = model_data_downsampled,
+                  family = wiener(link_bs = "identity", 
+                                  link_ndt = "log",
+                                  link_bias = "identity"),
+                  prior = m4_prior, 
+                  init = m4_initfun,
+                  iter = 1000, 
+                  warmup = 500, 
+                  chains = 4, 
+                  cores = 4, 
+                  refresh = 1,
+                  file = "fit_wiener_model_4",
+                  control = list(max_treedepth = 15, adapt_delta = 0.95))
+```
+
+```{r}
+m4_fit
+```
+### 9.2.a Testing parameters with ROPE
+
+```{r}
+# we can use ROPE for hypothesis testing
+# extracting posterior
+draws <- as_draws_df(m4_fit)
+
+# testing abs_H_difference
+abs_H_draws <- draws$b_abs_H_difference
+bayestestR::rope(abs_H_draws, ci = 1)
+```
+```{r}
+# testing abs_H_difference
+H_sum_draws <- draws$b_H_sum
+bayestestR::rope(H_sum_draws, ci = 1)
+```
+```{r}
+# testing the interaction term
+H_diff_sum_inter_draws <- draws$`b_abs_H_difference:H_sum`
+bayestestR::rope(H_diff_sum_inter_draws, ci = 1)
+```
+
+
+
+```{r}
+
+```
+
+
+```{r}
+hypothesis(m4_fit, "abs_H_difference > 0")
+hypothesis(m4_fit, "H_sum > 0")
+hypothesis(m4_fit, "abs_H_difference:H_sum > 0") # do they have to be directional?
+```
+Computing model predictions:
+
+```{r}
+# # creating predictions from the model (this takes a wile)
+# n <- 500
+# pred_m4 <- predict(m4_fit, 
+#                        summary = FALSE, 
+#                        negative_rt = TRUE, 
+#                        ndraws = n)
+# 
+# # saving predictions
+# save(pred_m4, file = "brms_wiener_m4_predictions.rda", 
+#      compress = "xz")
+
+# load the old predictions
+load(file = "brms_wiener_m4_predictions.rda")
+
+# this load() creates a new object in the env. called 'pred_m4' with our old model predictions
+```
+
+
+# 10. Visual diagnostics
+
+## 10.1 m1 trace
+
+```{r}
+#fit_wiener
+#m2_fit
+```
+
+```{r}
+# plotting intercept estimates for the DDM parameters
+pars <- parnames(fit_wiener)
+pars_sel <- c(sample(pars[1:10], 3), sample(pars[-(1:10)], 3))
+plot(fit_wiener, variable = pars_sel, nvariables = 6, 
+     ask = FALSE, exact_match = TRUE, newpage = TRUE, plot = TRUE)
+```
+
+
+```{r}
+# plotting entropy coefficient as well:
+pars <- parnames(fit_wiener)
+pars_betas <- grep("^b_H", pars, value = TRUE)
+plot(fit_wiener, variable = pars_betas, exact_match = TRUE)
+```
+
+## 10.2 m2 trace
+
+```{r}
+pars <- parnames(m2_fit)
+pars_sel <- c(sample(pars[1:10], 3), sample(pars[-(1:10)], 3))
+plot(fit_wiener, variable = pars_sel, nvariables = 6, 
+     ask = FALSE, exact_match = TRUE, newpage = TRUE, plot = TRUE)
+```
+
+```{r}
+# plotting entropy coefficients:
+pars <- parnames(m2_fit)
+pars_betas <- grep("^b_H", pars, value = TRUE)
+plot(m2_fit, variable = pars_betas, exact_match = TRUE)
+```
+
+Comment: Traceplots are looking random enough for all parameters in both models.
+
+## 10.3 correlation plots
+
+```{r}
+# checking out correlation between parameters; m1
+pairs(fit_wiener$fit, pars = pars[c(1, 3, 5, 7, 9)])
+```
+```{r}
+# checking out correlation between parameters; m2
+pairs(m2_fit$fit, pars = pars[c(1, 3, 5, 7, 9)])
+```
+```{r}
+# checking out correlation between parameters; m2
+pars_betas <- grep("^b_", pars, value = TRUE)
+pairs(m2_fit$fit, pars = pars_betas)
+```
+Comment: No strong correlations are detected. b_Intercept and b_H_sum are moderately negatively correlated.
+
+```{r}
+draws <- as_draws_df(m2_fit)
+rho <- cor(draws$b_Intercept, draws$b_H_sum)
+cat("b_Intercept and b_H_sum correlation:", round(rho, 2))
+```
+
+The correlation is slightly stronger than the one in Singmann's tutorial.
+
+To get an overview of the correlation structure of all variables, we can use the following technique from Singmann: Extract a table of all parameter correlations, and plot their histogram:
+
+```{r}
+# compiling table
+posterior <- as.mcmc(fit_wiener, combine_chains = TRUE)
+cor_posterior <- cor(posterior)
+cor_posterior[lower.tri(cor_posterior, diag = TRUE)] <- NA
+cor_long <- as.data.frame(as.table(cor_posterior))
+cor_long <- na.omit(cor_long)
+tail(cor_long[order(abs(cor_long$Freq)),], 10)
+
+# creating histogram
+hist(cor_long$Freq, breaks = 40,
+     main = "Histogram of parameter correlation Rhos, model 1")
+```
+
+```{r}
+# compiling table
+posterior <- as.mcmc(m2_fit, combine_chains = TRUE)
+cor_posterior <- cor(posterior)
+cor_posterior[lower.tri(cor_posterior, diag = TRUE)] <- NA
+cor_long <- as.data.frame(as.table(cor_posterior))
+cor_long <- na.omit(cor_long)
+tail(cor_long[order(abs(cor_long$Freq)),], 10)
+
+# creating histogram
+hist(cor_long$Freq, breaks = 40,
+     main = "Histogram of parameter correlation Rhos, model 2")
+```
+
+Most parameters are completely uncorrelated, and this is a good sign! Following Singmann, this means that the sampler is able to sample effectively from the model.
+
+Overall, there are no indications of sampling issues in either of the models based on the visual diagnostics.
+
+
+# 11. Diagnostics of model 4
+
+```{r}
+# checking Rhat and effective samples
+tail(sort(rstan::summary(m4_fit$fit)$summary[,"Rhat"]))
+head(sort(rstan::summary(m4_fit$fit)$summary[,"n_eff"]))
+```
+R-hats are below 1.05 and effective samples are above > 100 for all parameters; which means they are unproblematic according to Singmann.
+
+```{r}
+# visually assessing the posterior of select parameters
+pars <- variables(m4_fit)
+pars_sel <- c(sample(pars[1:10], 3), sample(pars[-(1:10)], 3))
+plot(m4_fit, variable = pars_sel, nvariables = 2, 
+     ask = FALSE, exact_match = TRUE, newpage = TRUE, plot = TRUE)
+```
+Within this subset of parameters, all chains looks to have mixed sufficiently random and the posterior distributions are looking non-suspicious.
+
+We can also check correlations between parameters to probe possible parameter trade-offs in the model:
+
+```{r}
+pairs(m4_fit$fit, pars = pars[c(1, 3, 5, 7, 9, 11, 13)])
+```
+
+There is a strong correlation between the entropy difference and the entropy difference / entropy sum interaction; this is expected given that it is an interaction term! Otherwise, there are weaker correlations, but nothing that looks very concerning.
+
+Following Singmann, we can produce a histogram of the pairwise correlations of all parameters, to see if there could be estimation problems due to correlated parameters:
+
+```{r}
+posterior <- as.mcmc(m4_fit, combine_chains = TRUE)
+cor_posterior <- cor(posterior)
+cor_posterior[lower.tri(cor_posterior, diag = TRUE)] <- NA
+cor_long <- as.data.frame(as.table(cor_posterior))
+cor_long <- na.omit(cor_long)
+tail(cor_long[order(abs(cor_long$Freq)),], 10)
+```
+```{r}
+hist(cor_long$Freq, breaks = 100,
+     main = "Histogram of pairwise parameter correlations for m4",
+     xlab = "Correlation")
+```
+The histogram indicates that most parameters are not correlated at all or only very weakly correlated. So, this is considered a good sign for the model convergence.
+
+# 12 (alt). Evaluating model fit visually
+
+```{r}
+# understanding the predictions object
+dim(pred_m4)
+dim(model_data_downsampled)
+```
+
+Plotting sampled posterior predictive RT distributions over actual RT distribution from the data, for incorrect and correct trials separately:
+
+```{r}
+# separating data and predictions by correct/incorrect status
+correct_idx <- model_data_downsampled$response == 1
+incorrect_idx <- model_data_downsampled$response == 0
+
+pred_correct <- pred_m4[, correct_idx]
+pred_incorrect <- pred_m4[, incorrect_idx]
+
+# plotting
+ppc_dens_overlay(y = model_data_downsampled$RT[correct_idx], 
+                 yrep = pred_correct[1:50, ]) +
+  ggtitle("Posterior predictive check: RTs for Correct Responses") +
+  theme(legend.position = "bottom")
+
+ppc_dens_overlay(y = model_data_downsampled$RT[correct_idx], 
+                 yrep = pred_correct[1:50, ]) +
+  ggtitle("Posterior predictive check: RTs for Correct Responses (zoomed in)") +
+  coord_cartesian(xlim = c(-3, 6))  
+
+ppc_dens_overlay(y = model_data_downsampled$RT[incorrect_idx], 
+                 yrep = pred_incorrect[1:50, ]) +
+  ggtitle("Posterior predictive check: RTs for Incorrect Responses") +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+# combining actual data with the model predictions
+d <- as_tibble(cbind(model_data_downsampled, as_tibble(t(pred_m4))))
+```
+
+
+## 12.2 Participant level predictions
+
+```{r}
+# test: plotting for a single participant
+idx <- 1
+participant_idx <- model_data_downsampled$ID == idx
+pred_participant <- pred_m4[,participant_idx]
+data_participant <- model_data_downsampled %>% filter(ID == idx) %>% select(RT)
+```
+
+```{r}
+pred_mean <- colMeans(pred_participant)
+
+plot(data_participant$RT, pred_mean,
+     xlab = "Observed RT", ylab = "Predicted RT")
+abline(0, 1, col = "red")
+```
+
+```{r}
+cor.test(model_data_downsampled$RT, pred_mean_all)
+```
+```{r}
+aggregate(RT ~ response, data = model_data_downsampled, mean)
+aggregate(pred_mean_all ~ response, data = model_data_downsampled, mean)
+```
+
+
+```{r}
+pred_mean_all <- colMeans(pred_m4)
+
+plot(model_data_downsampled$RT, pred_mean_all,
+     xlab = "Observed RT", ylab = "Predicted RT",
+     main = "All Participants")
+abline(0, 1, col = "red")
+
+# Get correlation
+cor(model_data_downsampled$RT, pred_mean_all)
+```
+```{r}
+# Create prediction grid
+new_data <- expand.grid(
+  abs_H_difference = seq(min(model_data_downsampled$abs_H_difference), 
+                         max(model_data_downsampled$abs_H_difference), 
+                         length.out = 50),
+  H_sum = mean(model_data_downsampled$H_sum)  # Hold at mean
+)
+
+# Get predictions
+pred_new <- predict(m4_fit, newdata = new_data, re_formula = NA, 
+                    summary = TRUE, probs = c(0.1, 0.9, 0.025, 0.975))
+
+new_data <- cbind(new_data, pred_new)
+```
+
+```{r}
+# Plot
+ggplot(new_data, aes(x = abs_H_difference, y = Estimate)) +
+  geom_point(data = model_data_downsampled, 
+             aes(x = abs_H_difference, y = RT), 
+             color = "#2E86AB", alpha = 0.15, size = 1) +
+  geom_ribbon(aes(ymin = Q2.5, ymax = Q97.5), 
+              fill = "grey30", alpha = 0.2) +
+  geom_ribbon(aes(ymin = Q10, ymax = Q90), 
+              fill = "grey30", alpha = 0.3) +
+  geom_line(size = 1.2, color = "black") +
+  labs(y = "Response Time (s)", 
+       x = "Abs. Shannon Entropy Difference (|H|)") +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.title = element_text(size = 13, face = "bold"),
+    axis.text = element_text(size = 11, color = "black"),
+    panel.grid.major = element_line(color = "grey90", size = 0.3),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+```
+## 12.3 Plotting predicted reponse times
+
+```{r}
+# adding reponse
+new_data_full <- expand.grid(
+  abs_H_difference = seq(min(model_data_downsampled$abs_H_difference), 
+                         max(model_data_downsampled$abs_H_difference), 
+                         length.out = 50),
+  H_sum = mean(model_data_downsampled$H_sum),
+  response = c(0, 1)  
+)
+
+pred_new <- predict(m4_fit, newdata = new_data_full, re_formula = NA, 
+                    summary = TRUE, probs = c(0.1, 0.9, 0.025, 0.975))
+
+new_data_full <- cbind(new_data_full, pred_new)
+```
+
+
+```{r}
+# Plot with facets
+ggplot(new_data_full, aes(x = abs_H_difference, y = Estimate)) +
+  geom_point(data = model_data_downsampled, 
+             aes(x = abs_H_difference, y = RT), 
+             color = "#2E86AB", alpha = 0.15, size = 1) +
+  geom_ribbon(aes(ymin = Q2.5, ymax = Q97.5), fill = "grey30", alpha = 0.2) +
+  geom_ribbon(aes(ymin = Q10, ymax = Q90), fill = "grey30", alpha = 0.3) +
+  geom_line(size = 1.2, color = "black") +
+  facet_wrap(~response, labeller = labeller(response = c("0" = "Incorrect", "1" = "Correct"))) +
+  labs(y = "Response Time (s)", x = "|Shannon Entropy Difference|") +
+  ggtitle("Predicted and Actual Response Times", "For Different Values of |Shannon Entropy Difference|") +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.title = element_text(size = 13, face = "bold"),
+    strip.background = element_rect(fill = "grey90", color = NA),
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+```
+Extracting summary statistics from the predictions:
+
+```{r}
+RT_low_entropy_diff <- new_data_full %>% filter(abs_H_difference<=0.1 & response==1) %>% pull(Estimate)
+RT_high_entropy_diff <- new_data_full %>% filter(abs_H_difference>=0.4 & response==1) %>% pull(Estimate)
+
+cat("Mean of predicted RTs for low entropy difference trials (round=2):", round(mean(RT_low_entropy_diff), 2), "s")
+cat("\nMean of predicted RTs for high entropy difference trials (round=2):", round(mean(RT_high_entropy_diff), 2), "s")
+```
+
+## 12.4 Plotting pred. response times for different H sum values
+
+```{r}
+# Create data with 3 H_sum values (e.g., low, medium, high)
+h_sum_values <- quantile(model_data_downsampled$H_sum, probs = c(0.25, 0.5, 0.75))
+
+new_data_full <- expand.grid(
+  abs_H_difference = seq(min(model_data_downsampled$abs_H_difference), 
+                         max(model_data_downsampled$abs_H_difference), 
+                         length.out = 50),
+  H_sum = h_sum_values,
+  response = c(0, 1)  
+)
+
+pred_new <- predict(m4_fit, newdata = new_data_full, re_formula = NA, 
+                    summary = TRUE, probs = c(0.1, 0.9, 0.025, 0.975))
+new_data_full <- cbind(new_data_full, pred_new)
+
+# Add labels for H_sum levels
+new_data_full$H_sum_label <- factor(new_data_full$H_sum,
+                                     levels = h_sum_values,
+                                     labels = c("Low H_sum", "Medium H_sum", "High H_sum"))
+```
+
+
+```{r}
+# Plot with facets for both response and H_sum
+ggplot(new_data_full, aes(x = abs_H_difference, y = Estimate, 
+                          color = H_sum_label, fill = H_sum_label)) +
+  geom_point(data = model_data_downsampled, 
+             aes(x = abs_H_difference, y = RT), 
+             color = "#2E86AB", alpha = 0.15, size = 1, 
+             inherit.aes = FALSE) +
+  geom_ribbon(aes(ymin = Q2.5, ymax = Q97.5), alpha = 0.15, color = NA) +
+  geom_ribbon(aes(ymin = Q10, ymax = Q90), alpha = 0.25, color = NA) +
+  geom_line(size = 1.2) +
+  facet_wrap(~response, labeller = labeller(response = c("0" = "Incorrect", "1" = "Correct"))) +
+  labs(y = "Response Time (s)", 
+       x = "Entropy Difference (|H|)",
+       color = "Entropy Sum",
+       fill = "Entropy Sum") +
+  scale_color_manual(values = c("Low H_sum" = "purple", 
+                                 "Medium H_sum" = "#F77F00", 
+                                 "High H_sum" = "#06A77D")) +
+  scale_fill_manual(values = c("Low H_sum" = "purple", 
+                                "Medium H_sum" = "#F77F00", 
+                                "High H_sum" = "#06A77D")) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.title = element_text(size = 13, face = "bold"),
+    strip.background = element_rect(fill = "grey90", color = NA),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.position = "bottom"
+  )
+```
+```{r}
+ggplot(new_data_full, aes(x = abs_H_difference, y = Estimate, 
+                          color = H_sum_label, group = H_sum_label)) +
+  geom_line(size = 1.5, alpha = 0.8) +
+  facet_wrap(~response, 
+             labeller = labeller(response = c("0" = "Incorrect", "1" = "Correct"))) +
+  scale_color_viridis_d(option = "plasma", end = 0.9, name = "Entropy Sum") +
+  labs(y = "Predicted RT (s)", 
+       x = "|Entropy Difference|") +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title = element_text(size = 13, face = "bold"),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12, face = "bold", hjust = 0),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "grey80", fill = NA, linewidth = 0.5)
+  )
+```
+
+
+# 13. Parameter recovery
+
+
+```{r}
+# defining true parameters from fitted model (m4)
+true_params <- list(
+  # drift parameters
+  drift_intercept = 1.77,
+  drift_abs_H_diff = 6.71,
+  drift_H_sum = 0.04,
+  drift_interaction = -3.69,
+  
+  # other parameters
+  bs_intercept = 3.58,
+  ndt_intercept = exp(-1.03),  # transformed from log scale
+  bias_intercept = 0.45
+)
+
+# obtaining values for entropy difference and sum from actual data
+sim_data <- model_data_downsampled %>%
+  select(ID, stimulus, abs_H_difference, H_sum) %>%
+  mutate(
+    # calculating delta as a linear term of H diff and H sum
+    delta = true_params$drift_intercept + 
+            true_params$drift_abs_H_diff * abs_H_difference +
+            true_params$drift_H_sum * H_sum +
+            true_params$drift_interaction * (abs_H_difference * H_sum)
+  )
+
+# simulate responses with rwiener
+set.seed(123)
+sims <- rwiener(n = nrow(sim_data),
+                alpha = true_params$bs_intercept,
+                tau = true_params$ndt_intercept,
+                beta = true_params$bias_intercept,
+                delta = sim_data$delta)
+
+# add simulated RTs and responses to data
+sim_data$RT <- abs(sims$q)
+sim_data$response <- as.numeric(sims$resp == "upper")
+```
+
+```{r}
+# checking incorrect/correct trials in sim and actual data
+table(sim_data$response)
+table(model_data_downsampled$response)
+```
+```{r}
+hist(sim_data$abs_H_difference)
+```
+```{r}
+summary(sim_data$RT)
+summary(model_data_downsampled$RT)
+```
+
+
+```{r}
+# # checking RT distributions
+# hist(sim_data$RT[sim_data$response==0], 
+#      xlim=c(0,5),
+#      col="red",
+#      main="Sim RT (incorrect)")
+# 
+# hist(model_data_downsampled$RT[model_data_downsampled$response==0],
+#      col="red",
+#      main="Data RT (incorrect)")
+# 
+# hist(sim_data$RT[sim_data$response==1], 
+#      xlim=c(0,5),
+#      col="blue",
+#      main="Sim RT (correct)")
+# 
+# hist(model_data_downsampled$RT[model_data_downsampled$response==1],
+#      col="blue",
+#      main="Data RT (correct)")
+```
+```{r}
+# fitting m4 on simulated data
+m4_formula <- bf(RT | dec(response) ~ abs_H_difference * H_sum + (1|ID) + (1 | stimulus), 
+                   bs ~ 1 + (1|ID), 
+                   ndt ~ 1 + (1|ID), 
+                   bias ~ 1 + (1|ID))
+
+m4_prior <- c(
+  prior(normal(0, 1), class = "b", coef = "abs_H_difference"),
+  prior(normal(0, 1), class = "b", coef = "H_sum"),
+  prior(normal(1.5, 0.5), class = "Intercept", dpar = "bs"),
+  prior(normal(-3, 0.5), class = "Intercept", dpar = "ndt")
+)
+
+m4_initfun <- function() {
+  list(
+    b = as.array(c(0, 0, 0)), 
+    Intercept = 0,
+    Intercept_bs = 1.5,
+    Intercept_ndt = -3.5, # this is in log!
+    Intercept_bias = 0.5,
+    # random effect SDs (for ID and stimulus)
+    sd_1 = as.array(0.1), 
+    sd_2 = as.array(0.1),
+    # SDs for the dpars since they have (1|ID)
+    sd_3 = as.array(0.1), # for bs
+    sd_4 = as.array(0.1), # for ndt
+    sd_5 = as.array(0.1)  # for bias
+  )
+}
+
+m4_fit_sim <- brm(m4_formula, 
+                  data = sim_data,
+                  family = wiener(link_bs = "identity", 
+                                  link_ndt = "log",
+                                  link_bias = "identity"),
+                  prior = m4_prior, 
+                  init = m4_initfun,
+                  iter = 1000, 
+                  warmup = 500, 
+                  chains = 4, 
+                  cores = 4, 
+                  refresh = 1,
+                  file = "fit_wiener_model_4_sim_3",
+                  control = list(max_treedepth = 15, adapt_delta = 0.95))
+```
+
+```{r}
+fixef(m4_fit)
+```
+```{r}
+# comparing recovered to true parameters
+fixef(m4_fit_sim)
+true_params
+```
+
+```{r}
+range(model_data_downsampled$abs_H_difference)
+
+```
+
+# 14. Trying a simpler model
+
+```{r}
+# fitting a new model without H sum including random stimulus intercepts
+m5_formula <- bf(RT | dec(response) ~ abs_H_difference + (1|ID) + (1 | stimulus), 
+                   bs ~ 1 + (1|ID), 
+                   ndt ~ 1 + (1|ID), 
+                   bias ~ 1 + (1|ID))
+
+m5_prior <- c(
+  prior(normal(0, 1), class = "b", coef = "abs_H_difference"),
+  prior(normal(1.5, 0.5), class = "Intercept", dpar = "bs"),
+  prior(normal(-3, 0.5), class = "Intercept", dpar = "ndt")
+)
+
+m5_initfun <- function() {
+  list(
+    b = as.array(0), # 1 0 = 1 fixed effects
+    Intercept = 0,
+    Intercept_bs = 1.5,
+    Intercept_ndt = -3.5, 
+    Intercept_bias = 0.5,
+    # Random effect SDs (one for ID, one for stimulus)
+    sd_1 = as.array(0.1), 
+    sd_2 = as.array(0.1),
+    # You might also need SDs for the dpars since they have (1|ID)
+    sd_3 = as.array(0.1), # for bs
+    sd_4 = as.array(0.1), # for ndt
+    sd_5 = as.array(0.1)  # for bias
+  )
+}
+
+m5_fit <- brm(m5_formula, 
+                  data = model_data_downsampled,
+                  family = wiener(link_bs = "identity", 
+                                  link_ndt = "log",
+                                  link_bias = "identity"),
+                  prior = m5_prior, 
+                  init = m5_initfun,
+                  iter = 2000, 
+                  warmup = 500, 
+                  chains = 4, 
+                  cores = 4, 
+                  refresh = 1,
+                  file = "fit_wiener_model_5_iter_2000",
+                  control = list(max_treedepth = 15, adapt_delta = 0.95))
+```
+
+```{r}
+summary(m5_fit)
+```
+
+Extracting fixed effects:
+
+```{r}
+round(fixef(m5_fit), 2)
+```
+
+
+Diagnostics:
+
+```{r}
+# checking Rhat and effective samples
+tail(sort(rstan::summary(m5_fit$fit)$summary[,"Rhat"]))
+head(sort(rstan::summary(m5_fit$fit)$summary[,"n_eff"]))
+```
+```{r}
+# visually assessing the posterior of select parameters
+pars <- variables(m5_fit)
+pars_sel <- c(sample(pars[1:10], 4), sample(pars[-(1:10)], 4))
+plot(m5_fit, variable = pars_sel, nvariables = 2, 
+     ask = FALSE, exact_match = TRUE, newpage = TRUE, plot = TRUE)
+```
+
+# 15. Trying new param recov
+
+```{r}
+m4_fit
+```
+
+```{r}
+# setting fixed effect parameters
+fixed_drift_intercept <- 1.77
+fixed_drift_abs_H <- 6.71
+fixed_drift_H_sum <- 0.04
+fixed_drift_interaction <- -3.69
+
+fixed_bs <- 3.58
+fixed_ndt <- -1.03
+fixed_bias <-  0.45
+
+# Extract random effects
+id_ranef <- ranef(m4_fit)$ID
+stimulus_ranef <- ranef(m4_fit)$stimulus
+
+# Create simulation data
+sim_data <- model_data_downsampled %>%
+  select(ID, stimulus, abs_H_difference, H_sum) %>%
+  rowwise() %>%
+  mutate(
+    # Drift rate with random intercepts
+    drift_intercept_total = fixed_drift_intercept + 
+                            id_ranef[ID, "Estimate", "Intercept"] + 
+                            stimulus_ranef[stimulus, "Estimate", "Intercept"],
+    
+    delta = drift_intercept_total + 
+            fixed_drift_abs_H * abs_H_difference +
+            fixed_drift_H_sum * H_sum +
+            fixed_drift_interaction * (abs_H_difference * H_sum),
+    
+    # Other parameters with ID random effects
+    alpha = fixed_bs + id_ranef[ID, "Estimate", "bs_Intercept"],
+    tau = exp(fixed_ndt + id_ranef[ID, "Estimate", "ndt_Intercept"]),
+    beta = fixed_bias + id_ranef[ID, "Estimate", "bias_Intercept"]
+  ) %>%
+  ungroup()
+
+# Simulate responses trial-by-trial
+set.seed(123)
+
+# Initialize empty vectors
+RT_vec <- numeric(nrow(sim_data))
+response_vec <- numeric(nrow(sim_data))
+
+# Loop through each trial
+for (i in 1:nrow(sim_data)) {
+  sim_result <- rwiener(n = 1,
+                        alpha = sim_data$alpha[i],
+                        tau = sim_data$tau[i],
+                        beta = sim_data$beta[i],
+                        delta = sim_data$delta[i])
+  
+  RT_vec[i] <- abs(sim_result$q)
+  response_vec[i] <- as.numeric(sim_result$resp == "upper")
+}
+
+# Add to data
+sim_data$RT <- RT_vec
+sim_data$response <- response_vec
+```
+
+
+```{r}
+# confirming differences between participants
+hist(sim_data$RT[sim_data$ID==1])
+hist(sim_data$RT[sim_data$ID==2])
+hist(sim_data$RT[sim_data$ID==4])
+```
+```{r}
+m4_fit_sim_ranef <- brm(m4_formula, 
+                  data = sim_data,
+                  family = wiener(link_bs = "identity", 
+                                  link_ndt = "log",
+                                  link_bias = "identity"),
+                  prior = m4_prior, 
+                  init = m4_initfun,
+                  iter = 1000, 
+                  warmup = 500, 
+                  chains = 4, 
+                  cores = 4, 
+                  refresh = 1,
+                  file = "fit_wiener_model_4_sim_ranef",
+                  control = list(max_treedepth = 15, adapt_delta = 0.95))
+```
+```{r}
+m4_fit_sim_ranef
+```
+
+I should plot the true/inferred variables
+
+```{r}
+fixef(m4_fit_sim_ranef)
+```
+
+```{r}
+fixef(m4_fit)
+```
+Point range plot:
+```{r}
+true_params <- as.data.frame(fixef(m4_fit)) %>%
+  rownames_to_column("parameter") %>%
+  select(parameter, Estimate) %>%
+  mutate(type = "True")
+
+recovered_params <- as.data.frame(fixef(m4_fit_sim_ranef)) %>%
+  rownames_to_column("parameter") %>%
+  select(parameter, Estimate, Q2.5, Q97.5) %>%
+  mutate(type = "Inferred (95% CI)")
+
+params <- bind_rows(true_params, recovered_params)
+
+# plotting
+ggplot(params, aes(x = Estimate, y = parameter, color = type)) +
+  geom_vline(xintercept = 0, linetype = "dotted", linewidth = 0.3) +
+  geom_linerange(data = params %>% filter(type == "Inferred (95% CI)"),
+                 aes(xmin = Q2.5, xmax = Q97.5),
+                 position = position_nudge(y = -0.15),
+                 linewidth = 0.7) +
+  geom_point(data = params %>% filter(type == "Inferred (95% CI)"),
+             position = position_nudge(y = -0.15),
+             size = 2.5) +
+  geom_point(data = params %>% filter(type == "True"),
+             position = position_nudge(y = 0.15),
+             size = 2.5) +
+  scale_color_grey(start = 0.2, end = 0.6) +
+  scale_x_continuous(limits = c(-8, 8)) +
+  labs(x = "Estimate", 
+       y = NULL,
+       color = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "bottom",
+    legend.justification = "center",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    plot.margin = margin(10, 10, 10, 10),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5)
+  ) +
+  ggtitle("Parameter Recovery 1", subtitle = "Using Estimates from the first model fit as true values") 
+```
+Confirm that posterior distributions contain the point estimate:
+
+```{r}
+for (i in seq_along(true_params$Estimate)) {
+  
+  true_val <- true_params$Estimate[i]
+  lower <- recovered_params$Q2.5[i]
+  upper <- recovered_params$Q97.5[i]
+  
+  print(true_val >= lower & true_val <= upper)
+}
+```
+```{r}
+recovered_params$Q2.5[2]
+```
+
+
+# 16. Random param recov - local loop
+
+```{r}
+model_data_downsampled
+```
+
+
+```{r}
+# ===== SETTING UP LOOP FOR PARAMETER RECOVERY =====
+
+# defining number of fits for parameter recovery
+n_fit <- 1 # change for testing
+
+# Initialize storage list
+param_recovery_results <- list()
+
+# ====== STARTING THE LOOP  =======
+
+for (i in 1:n_fit){
+
+  cat("Starting parameter recovery batch with seed offset:", seed_entropy, "\n")
+  start_time <- Sys.time()
+    
+  set.seed(i)
+  
+  # setting fixed effect parameters
+  fixed_drift_intercept <- runif(n=1, min=-4, max=4)
+  fixed_drift_abs_H <- rnorm(n=1, mean=0, sd=2.5)
+  fixed_drift_H_sum <- rnorm(n=1, mean=0, sd=2)
+  fixed_drift_interaction <- rnorm(n=1, mean=0, sd=1)
+  
+  fixed_bs <- runif(n=1, min=0.6, max=2)
+  fixed_ndt = runif(n=1,min=0.2,max=1)
+  fixed_bias <- runif(n=1, min=0.4, max=0.6)
+    
+  
+  # Extract random effects
+  id_ranef <- ranef(m4_fit)$ID
+  stimulus_ranef <- ranef(m4_fit)$stimulus
+  
+  # Create simulation data
+  sim_data <- model_data_downsampled %>%
+    select(ID, stimulus, abs_H_difference, H_sum) %>%
+    rowwise() %>%
+    mutate(
+      # Drift rate with random intercepts
+      drift_intercept_total = fixed_drift_intercept + 
+                              id_ranef[ID, "Estimate", "Intercept"] + 
+                              stimulus_ranef[stimulus, "Estimate", "Intercept"],
+      
+      delta = drift_intercept_total + 
+              fixed_drift_abs_H * abs_H_difference +
+              fixed_drift_H_sum * H_sum +
+              fixed_drift_interaction * (abs_H_difference * H_sum),
+      
+      # Other parameters with ID random effects
+      alpha = pmax(fixed_bs + id_ranef[ID, "Estimate", "bs_Intercept"], 0.001), # forced to be positive to allow simulation
+      tau = exp(fixed_ndt + id_ranef[ID, "Estimate", "ndt_Intercept"]),
+      beta = fixed_bias + id_ranef[ID, "Estimate", "bias_Intercept"]
+    ) %>%
+    ungroup()
+  
+  # Simulate responses trial-by-trial
+  set.seed(123)
+  
+  # Initialize empty vectors
+  RT_vec <- numeric(nrow(sim_data))
+  response_vec <- numeric(nrow(sim_data))
+  
+  # Loop through each trial
+  for (trial in 1:nrow(sim_data)) {
+    sim_result <- rwiener(n = 1,
+                          alpha = sim_data$alpha[trial],
+                          tau = sim_data$tau[trial],
+                          beta = sim_data$beta[trial],
+                          delta = sim_data$delta[trial])
+    
+    rt <- abs(sim_result$q)
+    RT_vec[trial] <- ifelse(rt <= 0 | is.na(rt), 1e-4, rt) # makes sure RT can't be 0
+    response_vec[trial] <- as.numeric(sim_result$resp == "upper")
+  }
+  
+  # Add to data
+  sim_data$RT <- RT_vec
+  sim_data$response <- response_vec
+    
+    # ===== fitting m4 on simulated data =====
+    fit_sim <- brm(m4_formula,
+                   data = sim_data,
+                   family = wiener(link_bs = "identity",
+                                   link_ndt = "log",
+                                   link_bias = "identity"),
+                   prior = m4_prior,
+                   init = m4_initfun,
+                   iter = 4,
+                   warmup = 2,
+                   chains = 4,
+                   cores = 4,
+                   refresh = 1,
+                   control = list(max_treedepth = 15, adapt_delta = 0.95))
+  
+  # extracting fixed effect coefficients
+  sim_coefficients <- fixef(fit_sim)
+  sim_coefficients_df <- data.frame(t(sim_coefficients))
+  
+  # Store results for this iteration
+  param_recovery_results[[i]] <- list(
+    true = list(
+      drift_intercept = fixed_drift_intercept,
+      drift_abs_H_diff = fixed_drift_abs_H,
+      drift_H_sum = fixed_drift_H_sum,
+      drift_interaction = fixed_drift_interaction,
+      bs_intercept = fixed_bs,
+      ndt_intercept = fixed_ndt,
+      bias_intercept = fixed_bias
+    ),
+    inferred = list(
+      drift_intercept = sim_coefficients_df$Intercept,
+      drift_abs_H_diff = sim_coefficients_df$abs_H_difference,
+      drift_H_sum = sim_coefficients_df$H_sum,
+      drift_interaction = sim_coefficients_df$abs_H_difference.H_sum,
+      bs_intercept = sim_coefficients_df$bs_Intercept,
+      ndt_intercept = sim_coefficients_df$ndt_Intercept,
+      bias_intercept = sim_coefficients_df$bias_Intercept
+    )
+  )
+  
+  # cat(sprintf("Batch %d, Iteration %d complete\n", i))
+  
+  end_time <- Sys.time()
+  cat("Time elapsed:", format(end_time - start_time), "\n")
+}
+
+# saving the file
+saveRDS(param_recovery_results, file="/Users/christianstenbro/Programming/disk_ddm/param_recovery/local_m4_rand/param_recov_local_actual_fit.Rdata")
+
+```
+Looking at data structure:
+
+- True should be a point value;
+- Would like to have full estimates (M, SD, CI) for the remaining parameters
+
+
+```{r}
+saveRDS(param_recovery_results, file="/Users/christianstenbro/Programming/disk_ddm/param_recovery/local_m4_rand/param_recov_local.Rdata")
+```
+
+```{r}
+readRDS(file="/Users/christianstenbro/Programming/disk_ddm/param_recovery/local_m4_rand/param_recov_local.Rdata")
+```
+
+
+```{r}
+param_recovery_results
+```
+
+
+```{r}
+for (i in 1){
+
+# Store results for this iteration
+param_recovery_results[[i]] <- list(
+  true = list(
+    drift_intercept = fixed_drift_intercept,
+    drift_abs_H_diff = fixed_drift_abs_H,
+    drift_H_sum = fixed_drift_H_sum,
+    drift_interaction = fixed_drift_interaction,
+    bs_intercept = fixed_bs,
+    ndt_intercept = fixed_ndt,
+    bias_intercept = fixed_bias
+  ),
+  inferred = list(
+    drift_intercept = sim_coefficients_df$Intercept,
+    drift_abs_H_diff = sim_coefficients_df$abs_H_difference,
+    drift_H_sum = sim_coefficients_df$H_sum,
+    drift_interaction = sim_coefficients_df$abs_H_difference.H_sum,
+    bs_intercept = sim_coefficients_df$bs_Intercept,
+    ndt_intercept = sim_coefficients_df$ndt_Intercept,
+    bias_intercept = sim_coefficients_df$bias_Intercept
+  )
+  )
+}
+```
+
+```{r}
+param_recovery_results[[1]]$inferred$abs_H_difference
+```
+
+```{r}
+sim_coefficients_df$abs_H_difference
+```
+
+
+
+
+Testing simulation...
+```{r}
+# setting fixed effect parameters
+fixed_drift_intercept <- runif(n=1, min=-4, max=4)
+fixed_drift_abs_H <- rnorm(n=1, mean=0, sd=2.5)
+fixed_drift_H_sum <- rnorm(n=1, mean=0, sd=2)
+fixed_drift_interaction <- rnorm(n=1, mean=0, sd=1)
+
+fixed_bs <- runif(n=1, min=0.6, max=2)
+fixed_ndt = runif(n=1,min=0.2,max=1)
+fixed_bias <- runif(n=1, min=0.4, max=0.6)
+  
+
+# Extract random effects
+id_ranef <- ranef(m4_fit)$ID
+stimulus_ranef <- ranef(m4_fit)$stimulus
+
+# Create simulation data
+sim_data <- model_data_downsampled %>%
+  select(ID, stimulus, abs_H_difference, H_sum) %>%
+  rowwise() %>%
+  mutate(
+    # Drift rate with random intercepts
+    drift_intercept_total = fixed_drift_intercept + 
+                            id_ranef[ID, "Estimate", "Intercept"] + 
+                            stimulus_ranef[stimulus, "Estimate", "Intercept"],
+    
+    delta = drift_intercept_total + 
+            fixed_drift_abs_H * abs_H_difference +
+            fixed_drift_H_sum * H_sum +
+            fixed_drift_interaction * (abs_H_difference * H_sum),
+    
+    # Other parameters with ID random effects
+    alpha = pmax(fixed_bs + id_ranef[ID, "Estimate", "bs_Intercept"], 0.001), # forced to be positive to allow simulation
+    tau = exp(fixed_ndt + id_ranef[ID, "Estimate", "ndt_Intercept"]),
+    beta = fixed_bias + id_ranef[ID, "Estimate", "bias_Intercept"]
+  ) %>%
+  ungroup()
+
+# Simulate responses trial-by-trial
+set.seed(123)
+
+# Initialize empty vectors
+RT_vec <- numeric(nrow(sim_data))
+response_vec <- numeric(nrow(sim_data))
+
+# Loop through each trial
+for (i in 1:nrow(sim_data)) {
+  sim_result <- rwiener(n = 1,
+                        alpha = sim_data$alpha[i],
+                        tau = sim_data$tau[i],
+                        beta = sim_data$beta[i],
+                        delta = sim_data$delta[i])
+  
+  RT_vec[i] <- abs(sim_result$q)
+  response_vec[i] <- as.numeric(sim_result$resp == "upper")
+}
+
+# Add to data
+sim_data$RT <- RT_vec
+sim_data$response <- response_vec
+```
+
+
